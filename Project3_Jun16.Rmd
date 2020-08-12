@@ -1,0 +1,492 @@
+---
+title: "Comparitive study on Machine learning Regression Models"
+author: "José Pinto, Mariana Monteiro, Nirbhaya Shaji, Nuno Costa"
+date: "24/05/2020"
+output:
+  html_document:
+    code_folding: hide
+  pdf_document: default
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Introduction
+
+Modeling sequences is an advantageous feature in some ANN architectures, as there are plenty applications for sequence modeling, one of them being, for example, Speech Generation or Image Caption Generation. Sequences can appear in many forms, but what these all have in common is that each sequence can be seen as a series of data points. In this work, we will use XML-like strings as our sequences. 
+
+## Goals
+
+The main goal of this work is to be able to study some properties of a few ANN architectures, namely MLP, RNN's and LSTM's. To do this, we will generate increasingly complex data and try to predict the last character of a subsequence of k characters. 
+
+## Models
+
+## Dataset
+
+```{r libraries, message=FALSE, warning=FALSE}
+library(keras)
+library(magrittr)
+#keras::use_condaenv("r-tensorflow", required = TRUE)
+#install_keras(method = "conda")
+```
+
+Below we have the xml like string generator function provided by the professor.<br>
+
+```{r xmlGenerator}
+gen_tag <- function(maxtaglen=5, all_letters=1) {
+  taglen<-floor(runif(1)*maxtaglen+1)
+  paste(letters[sample(1:(length(letters)*all_letters),taglen,replace=TRUE)], collapse='')
+}
+gen_line <- function(depth=5,...) {
+  inner <- ""
+  size <- runif(1)*7+3
+  tag<-gen_tag(...)
+  inner<-""
+  while(runif(1)>0.4 && depth>0)
+    if(inner=="")
+      inner<-gen_line(depth=depth-1,...)
+    else
+      inner<-paste(inner,gen_line(depth=depth-1,...))
+  endtag<-paste("<",tag,collapse='',sep='')
+  if(inner=="")
+    paste(tag,endtag)
+  else
+    paste(tag,inner,endtag)
+}
+# this function generates full sequences. You can truncate them using indexes.
+gen_xml_data <- function(len=1000,...)
+sapply(1:len,function(i) gen_line(...))
+```
+
+We use said function to create three datasets, a simple one, a normal/medium one and an hard one.<br>
+The simple dataset only uses "a" in the tags, with a maximum tag length of 1, and maximum nesting of also one.<br>
+The normal dataset use a subset of all the letters, with a maximum tag length of 3 and nesting depth of 3.<br>
+Finnaly, the hard dataset, uses all letters, with a naximum tag length of 5 and nesting depth of 4.<br>
+
+```{r xmlStrings}
+simpleXml = gen_xml_data(len=2000, depth=1,maxtaglen=1,all_letters=0.05)
+normalXml = gen_xml_data(len=2000, depth=3,maxtaglen=3,all_letters=0.3)
+hardXml = gen_xml_data(len=2000, depth=4,maxtaglen=5,all_letters=1)
+```
+
+Below we show a sample of the raw datasets, which we will next transform to a more suitable form.<br>
+
+```{r xmlStringsPrint}
+print("Simple Xml data:")
+print(head(simpleXml))
+print("Nomal Xml data:")
+print(head(normalXml))
+print("Hard Xml data:")
+print(head(hardXml))
+```
+
+## Pre-processing
+
+The first thing we are going to do is to transform our strings into an array of numbers, where each number is a unique identifier of a character of the string.<br>
+Below we show the function to perform such operation.<br>
+
+```{r labelEncoder}
+# turn a string into an array of encoded integers
+labelEncoder = function(string, levels=NULL){
+  # if possible characters not provided set default, all letters + space + "<"
+  if(is.null(levels)){
+    levels = c(letters," ","<") 
+  }
+  # split string into its characters
+  stringArray = strsplit(string,'')[[1]]
+  # change characters into numeric factors
+  encodedString = as.numeric(factor(stringArray,levels = levels))
+  # shift factors to start at 0 (instead of 1)
+  shiftedEncoding = encodedString - 1
+  return(shiftedEncoding)
+}
+
+# label encodes all strings in one array
+arrayLabelEncoder = function(arr, levels=NULL){
+  encodedArray = c()
+  for(string in arr){
+    encodedArray = c(encodedArray, list(labelEncoder(string, levels)))
+  }
+  return(encodedArray)
+}
+```
+
+Now we will pply the function to all our datasets.<br>
+
+```{r encoding}
+# '_' used for padding
+vocab = c(letters," ","<","_")
+simpleXmlEncoded = arrayLabelEncoder(simpleXml, vocab)
+normalXmlEncoded = arrayLabelEncoder(normalXml, vocab)
+hardXmlEncoded = arrayLabelEncoder(hardXml, vocab)
+```
+
+Below we can se a sample for the obtained results of this encoding.<br>
+
+```{r encodingPrint}
+print("Simple Xml data:")
+print(head(simpleXmlEncoded))
+print("Nomal Xml data:")
+print(head(normalXmlEncoded))
+print("Hard Xml data:")
+print(head(hardXmlEncoded))
+```
+
+Now that our dataset has the intended values and a more workable format (string) we will proceed to split the datasets into train, validation and test. For a total of 9 different data objects.<br>
+As all found funtcions lacked some of the indended functionality, we created our own, presented below, to perform the operation.<br>
+
+```{r splitFunction}
+# split the data into n variable size partitions without overlap
+# partitions represent proportion of data after first
+# example, for a train 70%, validation 5%, test 25% - partition = c(0.05,0.25)
+dataSplit = function(data, partitions = c(0.3)){
+  # check if partitions are valid
+  if(sum(partitions)>1){
+    print("Total size of partitions greater than one. Aborting")
+    return()
+  }
+  remainingData = data
+  sets = c()
+  # obtain data ofr each partition
+  for(partition in partitions){
+    partitionSize = floor(partition * length(data))
+    partitionIndex = sample(seq_len(length(data)), size = partitionSize)
+    sets = c(sets, list(data[partitionIndex]))
+    remainingData = data[-partitionIndex]
+  }
+  
+  # add remaining data to the top of the list (train data, for example)
+  sets =  c(list(remainingData), sets)
+  return(sets)
+}
+```
+
+And here, we use the function to perform the split.<br>
+
+```{r split}
+# split simple XML data
+simpleXmlTrain = dataSplit(simpleXmlEncoded, c(0.05,0.3))[[1]]
+simpleXmlValidation = dataSplit(simpleXmlEncoded, c(0.05,0.3))[[2]]
+simpleXmlTest = dataSplit(simpleXmlEncoded, c(0.05,0.3))[[3]]
+# split normal XML data
+normalXmlTrain = dataSplit(normalXmlEncoded, c(0.05,0.3))[[1]]
+normalXmlValidation = dataSplit(normalXmlEncoded, c(0.05,0.3))[[2]]
+normalXmlTest = dataSplit(normalXmlEncoded, c(0.05,0.3))[[3]]
+# split hard XML data
+hardXmlTrain = dataSplit(hardXmlEncoded, c(0.05,0.3))[[1]]
+hardXmlValidation = dataSplit(hardXmlEncoded, c(0.05,0.3))[[2]]
+hardXmlTest = dataSplit(hardXmlEncoded, c(0.05,0.3))[[3]]
+```
+
+Finally, we need to transform our data into x and y (features and targets).<br>
+To do this, we use an windowed approach, with x being a martrix of n by m, n being the window size and m being the dataset size.<br>
+We also apply padding to the start of the data, allowing us to use the full data, without skipping.<br>
+As an example, this padding would obtain as the first row in the matrix for the string "a <a" and a window size of 4, ['_','_','_','a'].<br>
+
+```{r windowFunction}
+# turn a temporal dataset into a series of windows and targets
+createWindow = function(data, windowSize, padding = TRUE, paddSimbol = 28){
+  features = c()
+  targets = c()
+  # obtain windows for each example in data
+  for(example in data){
+    # padd the start of the example
+    paddedExample = c(rep(paddSimbol, windowSize-1),example)
+    window = c()
+    target = c()
+    for(i in 1:(length(example)-1)){
+      # obtain a window
+      window = rbind(window,paddedExample[i:(i+windowSize-1)])
+      # obtain a target
+      target = rbind(target,paddedExample[i+windowSize])
+    }
+    # save all windows and targets
+    features = rbind(features, window)
+    targets = rbind(targets, target)
+  }
+  return(list(features,targets))
+}
+```
+
+For the y (target), the selected approach was to one hot encode it, to more easily allow verification.<br>
+As the different datasets might contain different characters and we want the encoding to be consistent, we use the vocabulary (containing all letters, padding and other used simbols), to create the one hot encoding, forcing even if the character does not exist in the data, for the column to be created.<br>
+
+```{r oneHot}
+# one hot encode column, with extra columns for possible values that do not show
+one_hot = function(data,vocab){
+  hotData = data.frame(data)
+  for (char in 0:(length(vocab)-1)){
+    hotData[paste("c",char,sep=".")] = ifelse(hotData[,1]==char,1,0)
+  }
+  hotData[,1]=NULL
+  return(as.matrix(hotData))
+}
+```
+
+We selected a window size of 4.<br>
+We split the simple data.<br>
+
+```{r simpleSplit}
+windowSize = 4
+# split simple train data into X and Y
+simpleXmlTrainX = createWindow(simpleXmlTest,windowSize)[[1]]
+simpleXmlTrainY = one_hot(createWindow(simpleXmlTest,windowSize)[[2]],vocab)
+# split simple validation data into X and Y
+simpleXmlValidationX = createWindow(simpleXmlValidation,windowSize)[[1]]
+simpleXmlValidationY = one_hot(createWindow(simpleXmlValidation,windowSize)[[2]],vocab)
+# split simple test data into X and Y
+simpleXmlTestX = createWindow(simpleXmlTest,windowSize)[[1]]
+simpleXmlTestY = one_hot(createWindow(simpleXmlTest,windowSize)[[2]],vocab)
+```
+
+The normal data.<br>
+
+```{r normalSplit}
+# split normal train data into X and Y
+normalXmlTrainX = createWindow(normalXmlTrain,windowSize)[[1]]
+normalXmlTrainY = one_hot(createWindow(normalXmlTrain,windowSize)[[2]],vocab)
+# split normal validation data into X and Y
+normalXmlValidationX = createWindow(normalXmlValidation,windowSize)[[1]]
+normalXmlValidationY = one_hot(createWindow(normalXmlValidation,windowSize)[[2]],vocab)
+# split normal test data into X and Y
+normalXmlTestX = createWindow(normalXmlTest,windowSize)[[1]]
+normalXmlTestY = one_hot(createWindow(normalXmlTest,windowSize)[[2]],vocab)
+```
+
+And, the hard data.<br>
+
+```{r hardSplit}
+# split hard train data into X and Y
+hardXmlTrainX = createWindow(hardXmlTrain,windowSize)[[1]]
+hardXmlTrainY = one_hot(createWindow(hardXmlTrain,windowSize)[[2]],vocab)
+# split hard validation data into X and Y
+hardXmlValidationX = createWindow(hardXmlValidation,windowSize)[[1]]
+hardXmlValidationY = one_hot(createWindow(hardXmlValidation,windowSize)[[2]],vocab)
+# split hard test data into X and Y
+hardXmlTestX = createWindow(hardXmlTest,windowSize)[[1]]
+hardXmlTestY = one_hot(createWindow(hardXmlTest,windowSize)[[2]],vocab)
+```
+
+## Modeling
+
+Now that we have our data we will use the three required models, creating them, selecting the hyperparameters and validating the results.<br>
+
+### MLP
+
+First we start with the MLP, which will work as the baseline, against which we will compare our other models.<br>
+We selected the architectures individually for each dataset, in order to increase performance.<br>
+
+#### Simple dataset
+
+After some testing , we selected three hidden layers, with weights 32, 32, 16 respectively.<br>
+As we are usig the one hot encoded target, we use classification loss and metric, with the last layer activation function being a sigmoid.<br>
+
+```{r mlpSimpleModel, warning=FALSE}
+# create MLP model
+model <- keras_model_sequential() 
+  # set input layer
+model %>% 
+    layer_dense(units = 32, input_shape = c(windowSize), activation = "relu") %>%
+  # add hidden layers
+    # size power of 2
+    # activation function relu
+    layer_dense(units = 32, activation = "relu") %>%
+    layer_dense(units = 16, activation = "relu") %>%
+  # add output layer
+    # size = to vocab size
+    # activation sigmoid for classification
+    layer_dense(units = length(vocab), activation = "sigmoid") %>%
+
+  # compile with error for classification and optimization algorithm
+    compile(
+    loss = 'binary_crossentropy',
+    optimizer = optimizer_rmsprop(),
+    metrics = c('accuracy')
+  )
+```
+
+Then we trained the model until convergence, using the validation data to gauge the models performance on unseen data.<br>
+
+```{r mlpSimpleTraining, warning=FALSE}
+# train MLP
+fit_mlp <- model %>%
+  fit(
+    x = simpleXmlTrainX,
+    y = simpleXmlTrainY,
+    validation_data = list(simpleXmlValidationX,simpleXmlValidationY),
+    epochs = 25,
+    batch_size = 8,
+  )
+
+fit_mlp
+plot(fit_mlp)
+```
+
+#### Normal dataset
+
+After some testing , we selected two hidden layers, with weights 32, 16 respectively.<br>
+As we are usig the one hot encoded target, we use classification loss and metric, with the last layer activation function being a sigmoid.<br>
+
+```{r mlpNormalModel, warning=FALSE}
+# create MLP model
+model <- keras_model_sequential() 
+  # set input layer
+model %>% 
+    layer_dense(units = 32, input_shape = c(windowSize), activation = "relu") %>%
+  # add hidden layers
+    # size power of 2
+    # activation function relu
+    layer_dense(units = 16, activation = "relu") %>%
+  # add output layer
+    # size = to vocab size
+    # activation sigmoid for classification
+    layer_dense(units = length(vocab), activation = "sigmoid") %>%
+
+  # compile with error for classification and optimization algorithm
+    compile(
+    loss = 'binary_crossentropy',
+    optimizer = optimizer_rmsprop(),
+    metrics = c('accuracy')
+  )
+```
+
+Then we trained the model until convergence, using the validation data to gauge the models performance on unseen data.<br>
+
+```{r mlpNormalTraining, warning=FALSE}
+# train MLP
+fit_mlp <- model %>%
+  fit(
+    x = normalXmlTrainX,
+    y = normalXmlTrainY,
+    validation_data = list(normalXmlValidationX,normalXmlValidationY),
+    epochs = 10,
+    batch_size = 8,
+  )
+
+fit_mlp
+plot(fit_mlp)
+```
+
+#### Hard dataset
+
+After some testing , we selected two hidden layers, with weights 32, 16 respectively.<br>
+As we are usig the one hot encoded target, we use classification loss and metric, with the last layer activation function being a sigmoid.<br>
+
+```{r mlpHardModel, warning=FALSE}
+# create MLP model
+model <- keras_model_sequential() 
+  # set input layer
+model %>% 
+    layer_dense(units = 32, input_shape = c(windowSize), activation = "relu") %>%
+  # add hidden layers
+    # size power of 2
+    # activation function relu
+    layer_dense(units = 16, activation = "relu") %>%
+  # add output layer
+    # size = to vocab size
+    # activation sigmoid for classification
+    layer_dense(units = length(vocab), activation = "sigmoid") %>%
+
+  # compile with error for classification and optimization algorithm
+    compile(
+    loss = 'binary_crossentropy',
+    optimizer = optimizer_rmsprop(),
+    metrics = c('accuracy')
+  )
+```
+
+Then we trained the model until convergence, using the validation data to gauge the models performance on unseen data.<br>
+
+```{r mlpHardTraining, warning=FALSE}
+# train MLP
+fit_mlp <- model %>%
+  fit(
+    x = hardXmlTrainX,
+    y = hardXmlTrainY,
+    validation_data = list(hardXmlValidationX,hardXmlValidationY),
+    epochs = 10,
+    batch_size = 8,
+  )
+
+fit_mlp
+plot(fit_mlp)
+```
+
+```{r todo, warning=FALSE}
+
+# create MLP model
+model <- keras_model_sequential() 
+  # set input layer
+model %>% 
+    layer_simple_rnn(units = 32, input_shape = c(windowSize,1), activation = "relu") %>%
+  # add hidden layers
+    # size power of 2
+    # activation function relu
+    layer_dense(units = 16, activation = "relu") %>%
+  # add output layer
+    # size = to vocab size
+    # activation sigmoid for classification
+    layer_dense(units = length(vocab), activation = "sigmoid") %>%
+
+  # compile with error for classification and optimization algorithm
+    compile(
+    loss = 'binary_crossentropy',
+    optimizer = optimizer_rmsprop(),
+    metrics = c('accuracy')
+  )
+
+# train MLP
+fit_mlp <- model %>%
+  fit(
+    x = array_reshape(simpleXmlTrainX,c(dim(simpleXmlTrainX),1)),
+    y = simpleXmlTrainY,
+    validation_data = list(array_reshape(simpleXmlValidationX,c(dim(simpleXmlValidationX),1)),simpleXmlValidationY),
+    epochs = 10,
+    batch_size = 8,
+  )
+
+fit_mlp
+plot(fit_mlp)
+# create RNN model
+  # set input layer
+  # add rnn layer
+  # add output layer
+    # size = to vocab size
+    # activation probably sigmoid for classification
+  # compile with error for classification and optimization algorithm
+
+# train RNN
+
+# validate and improve RNN model
+  # compare predictions with real values and get accuracy
+  # change model rnn layer size
+
+# add descriptions to steps in RNN model
+
+# create LSTM model
+
+# train LSTM
+
+# validate and improve LSTM model
+
+# add descriptions to steps in LSTM model
+
+# test MLP model
+  # compare predictions with real values and get accuracy 
+  # get other metrics
+
+# create conlusions for MLP model
+  # write results
+  # tried architectures
+  # insights
+
+# test RNN model
+  # compare predictions with real values and get accuracy 
+  # get other metrics
+# create conlusions for RNN model
+
+# test LSTM model
+
+# create conlusions for LSTM model
+```
